@@ -565,3 +565,128 @@ class AssocLSTM(Recurrent):
                   "inner_activation": self.inner_activation.__name__}
         base_config = super(AssocLSTM, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+class AssocRNN(Recurrent):
+    '''Fully-connected RNN where the output is to fed back to input.
+
+    # Arguments
+        output_dim: dimension of the internal projections and the final output.
+        init: weight initialization function.
+            Can be the name of an existing function (str),
+            or a Theano function (see: [initializations](../initializations.md)).
+        inner_init: initialization function of the inner cells.
+        activation: activation function.
+            Can be the name of an existing function (str),
+            or a Theano function (see: [activations](../activations.md)).
+    '''
+    def __init__(self, output_dim,
+                 init='glorot_uniform', inner_init='orthogonal',
+                 activation='sigmoid', **kwargs):
+        self.output_dim = output_dim
+        self.init = initializations.get(init)
+        self.inner_init = initializations.get(inner_init)
+        self.activation = activations.get(activation)
+        super(AssocRNN, self).__init__(**kwargs)
+
+    def build(self):
+        input_shape = self.input_shape
+        if self.stateful:
+            self.reset_states()
+        else:
+            # initial states: all-zero tensor of shape (output_dim)
+            self.states = [None, None, None]
+        input_dim = input_shape[2]
+        self.input_dim = input_dim
+
+        # input key
+        self.Wi = self.init((input_dim, self.output_dim/2))
+        self.Ui = self.inner_init((self.output_dim, self.output_dim/2))
+        self.bi = K.zeros((self.output_dim/2,))
+        self.trainable_weights = [self.Wi, self.Ui, self.bi]
+
+        # output key
+        self.Wo = self.init((input_dim, self.output_dim/2))
+        self.Uo = self.inner_init((self.output_dim, self.output_dim/2))
+        self.bo = K.zeros((self.output_dim/2,))
+        self.trainable_weights += [self.Wo, self.Uo, self.bo]
+
+        # real input transform
+        self.Wre = self.init((input_dim, self.output_dim/2))
+        self.Ure = self.inner_init((self.output_dim, self.output_dim/2))
+        self.bre = K.zeros((self.output_dim/2,))
+        self.trainable_weights += [self.Wre, self.Ure, self.bre]
+
+        # imaginary input transform
+        self.Wim = self.init((input_dim, self.output_dim/2))
+        self.Uim = self.inner_init((self.output_dim, self.output_dim/2))
+        self.bim = K.zeros((self.output_dim/2,))
+        self.trainable_weights += [self.Wim, self.Uim, self.bim]
+
+        if self.initial_weights is not None:
+            self.set_weights(self.initial_weights)
+            del self.initial_weights
+
+    def reset_states(self):
+        assert self.stateful, 'Layer must be stateful.'
+        input_shape = self.input_shape
+        if not input_shape[0]:
+            raise Exception('If a RNN is stateful, a complete ' +
+                            'input_shape must be provided ' +
+                            '(including batch size).')
+        if hasattr(self, 'states'):
+            K.set_value(self.states[0],
+                        np.zeros((input_shape[0], self.output_dim)))
+            K.set_value(self.states[1],
+                        np.zeros((input_shape[0], self.output_dim/2)))
+            K.set_value(self.states[2],
+                        np.zeros((input_shape[0], self.output_dim/2)))
+        else:
+            self.states = [K.zeros((input_shape[0], self.output_dim)),
+                           K.zeros((input_shape[0], self.output_dim/2)),
+                           K.zeros((input_shape[0], self.output_dim/2))]
+
+    def step(self, x, states):
+        # states only contains the previous output.
+        assert len(states) == 3
+        h = states[0]
+        c_re = states[1]
+        c_im = states[2]
+        input_key = K.dot(x, self.Wi) + K.dot(h, self.Ui) + self.bi
+        output_key = K.dot(x, self.Wo) + K.dot(h, self.Uo) + self.bo
+        re_transform = K.dot(x, self.Wre) + K.dot(h, self.Ure) + self.bre
+        im_transform = K.dot(x, self.Wim) + K.dot(h, self.Uim) + self.bim
+        
+        _, input_key = self.bound(input_key, input_key)
+        _, output_key = self.bound(output_key, output_key)
+        re_transform, im_transform = self.bound(re_transform, im_transform)
+
+        c_re, c_im = self.write(c_re, c_im, input_key, re_transform, im_transform)
+        h_re, h_im = self.read(c_re, c_im, output_key)
+
+        h = K.concatenate([h_re, h_im], axis=1)
+
+        return h, [h, c_re, c_im]
+
+    def write(self, c_re, c_im, key, re, im):
+        re_ = key * (re - im)
+        im_ = key * (re + im)
+        re_ += c_re
+        im_ += c_im
+        return re_, im_
+
+    def read(self, c_re, c_im, key):
+        re = key * (c_re - c_im)
+        im = key * (c_re + c_im)
+        return re, im
+
+    def bound(self, re, im):
+        norm = K.square(re).sum(axis=1,keepdims=True) + K.square(im).sum(axis=1,keepdims=True)
+        return re/norm, im/norm
+
+    def get_config(self):
+        config = {"output_dim": self.output_dim,
+                  "init": self.init.__name__,
+                  "inner_init": self.inner_init.__name__,
+                  "activation": self.activation.__name__}
+        base_config = super(AssocRNN, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
